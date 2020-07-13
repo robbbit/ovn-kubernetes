@@ -9,8 +9,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
+	"k8s.io/klog"
 )
 
 const (
@@ -24,20 +24,19 @@ func getBridgeName(iface string) string {
 
 // GetNicName returns the physical NIC name, given an OVS bridge name
 // configured by NicToBridge()
-func GetNicName(brName string) string {
+func GetNicName(brName string) (string, error) {
 	stdout, stderr, err := RunOVSVsctl(
 		"br-get-external-id", brName, "bridge-uplink")
 	if err != nil {
-		logrus.Errorf("Failed to get the bridge-uplink for the bridge %q:, stderr: %q, error: %v",
+		return "", fmt.Errorf("failed to get the bridge-uplink for the bridge %q:, stderr: %q, error: %v",
 			brName, stderr, err)
-		return ""
 	}
 	if stdout == "" && strings.HasPrefix(brName, "br") {
 		// This would happen if the bridge was created before the bridge-uplink
 		// changes got integrated.
-		return fmt.Sprintf("%s", brName[len("br"):])
+		return brName[len("br"):], nil
 	}
-	return stdout
+	return stdout, nil
 }
 
 func saveIPAddress(oldLink, newLink netlink.Link, addrs []netlink.Addr) error {
@@ -46,17 +45,17 @@ func saveIPAddress(oldLink, newLink netlink.Link, addrs []netlink.Addr) error {
 
 		// Remove from oldLink
 		if err := netlink.AddrDel(oldLink, &addr); err != nil {
-			logrus.Errorf("Remove addr from %q failed: %v", oldLink.Attrs().Name, err)
+			klog.Errorf("Remove addr from %q failed: %v", oldLink.Attrs().Name, err)
 			return err
 		}
 
 		// Add to newLink
 		addr.Label = newLink.Attrs().Name
 		if err := netlink.AddrAdd(newLink, &addr); err != nil {
-			logrus.Errorf("Add addr to newLink %q failed: %v", newLink.Attrs().Name, err)
+			klog.Errorf("Add addr to newLink %q failed: %v", newLink.Attrs().Name, err)
 			return err
 		}
-		logrus.Infof("Successfully saved addr %q to newLink %q", addr.String(), newLink.Attrs().Name)
+		klog.Infof("Successfully saved addr %q to newLink %q", addr.String(), newLink.Attrs().Name)
 	}
 
 	return netlink.LinkSetUp(newLink)
@@ -66,18 +65,18 @@ func saveIPAddress(oldLink, newLink netlink.Link, addrs []netlink.Addr) error {
 func delAddRoute(oldLink, newLink netlink.Link, route netlink.Route) error {
 	// Remove route from old interface
 	if err := netlink.RouteDel(&route); err != nil && !strings.Contains(err.Error(), "no such process") {
-		logrus.Errorf("Remove route from %q failed: %v", oldLink.Attrs().Name, err)
+		klog.Errorf("Remove route from %q failed: %v", oldLink.Attrs().Name, err)
 		return err
 	}
 
 	// Add route to newLink
 	route.LinkIndex = newLink.Attrs().Index
 	if err := netlink.RouteAdd(&route); err != nil && !os.IsExist(err) {
-		logrus.Errorf("Add route to newLink %q failed: %v", newLink.Attrs().Name, err)
+		klog.Errorf("Add route to newLink %q failed: %v", newLink.Attrs().Name, err)
 		return err
 	}
 
-	logrus.Infof("Successfully saved route %q", route.String())
+	klog.Infof("Successfully saved route %q", route.String())
 	return nil
 }
 
@@ -116,7 +115,7 @@ func saveRoute(oldLink, newLink netlink.Link, routes []netlink.Route) error {
 func setupDefaultFile() {
 	platform, err := runningPlatform()
 	if err != nil {
-		logrus.Errorf("Failed to set OVS package default file (%v)", err)
+		klog.Errorf("Failed to set OVS package default file (%v)", err)
 		return
 	}
 
@@ -133,7 +132,7 @@ func setupDefaultFile() {
 
 	fileContents, err := ioutil.ReadFile(defaultFile)
 	if err != nil {
-		logrus.Errorf("failed to parse file %s (%v)",
+		klog.Warningf("Failed to parse file %s (%v)",
 			defaultFile, err)
 		return
 	}
@@ -150,13 +149,13 @@ func setupDefaultFile() {
 	// We should set it.
 	f, err := os.OpenFile(defaultFile, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		logrus.Errorf("failed to open %s to write (%v)", defaultFile, err)
+		klog.Errorf("Failed to open %s to write (%v)", defaultFile, err)
 		return
 	}
 	defer f.Close()
 
 	if _, err = f.WriteString(text); err != nil {
-		logrus.Errorf("failed to write to %s (%v)",
+		klog.Errorf("Failed to write to %s (%v)",
 			defaultFile, err)
 		return
 	}
@@ -180,10 +179,10 @@ func NicToBridge(iface string) (string, error) {
 		"--", "--may-exist", "add-port", bridge, iface,
 		"--", "set", "port", iface, "other-config:transient=true")
 	if err != nil {
-		logrus.Errorf("Failed to create OVS bridge, stdout: %q, stderr: %q, error: %v", stdout, stderr, err)
+		klog.Errorf("Failed to create OVS bridge, stdout: %q, stderr: %q, error: %v", stdout, stderr, err)
 		return "", err
 	}
-	logrus.Infof("Successfully created OVS bridge %q", bridge)
+	klog.Infof("Successfully created OVS bridge %q", bridge)
 
 	setupDefaultFile()
 
@@ -234,7 +233,11 @@ func BridgeToNic(bridge string) error {
 		return err
 	}
 
-	ifaceLink, err := netlink.LinkByName(GetNicName(bridge))
+	nicName, err := GetNicName(bridge)
+	if err != nil {
+		return err
+	}
+	ifaceLink, err := netlink.LinkByName(nicName)
 	if err != nil {
 		return err
 	}
@@ -253,7 +256,7 @@ func BridgeToNic(bridge string) error {
 	// interface and delete that interface from the integration bridge
 	stdout, stderr, err := RunOVSVsctl("list-ifaces", bridge)
 	if err != nil {
-		logrus.Errorf("Failed to get interfaces for OVS bridge: %q, "+
+		klog.Errorf("Failed to get interfaces for OVS bridge: %q, "+
 			"stderr: %q, error: %v", bridge, stderr, err)
 		return err
 	}
@@ -261,7 +264,7 @@ func BridgeToNic(bridge string) error {
 	for _, iface := range ifacesList {
 		stdout, stderr, err = RunOVSVsctl("get", "interface", iface, "type")
 		if err != nil {
-			logrus.Warnf("Failed to determine the type of interface: %q, "+
+			klog.Warningf("Failed to determine the type of interface: %q, "+
 				"stderr: %q, error: %v", iface, stderr, err)
 			continue
 		} else if stdout != "patch" {
@@ -269,7 +272,7 @@ func BridgeToNic(bridge string) error {
 		}
 		stdout, stderr, err = RunOVSVsctl("get", "interface", iface, "options:peer")
 		if err != nil {
-			logrus.Warnf("Failed to get the peer port for patch interface: %q, "+
+			klog.Warningf("Failed to get the peer port for patch interface: %q, "+
 				"stderr: %q, error: %v", iface, stderr, err)
 			continue
 		}
@@ -277,7 +280,7 @@ func BridgeToNic(bridge string) error {
 		peer := strings.TrimSpace(stdout)
 		_, stderr, err = RunOVSVsctl("--if-exists", "del-port", "br-int", peer)
 		if err != nil {
-			logrus.Warnf("Failed to delete patch port %q on br-int, "+
+			klog.Warningf("Failed to delete patch port %q on br-int, "+
 				"stderr: %q, error: %v", peer, stderr, err)
 		}
 	}
@@ -285,9 +288,9 @@ func BridgeToNic(bridge string) error {
 	// Now delete the bridge
 	stdout, stderr, err = RunOVSVsctl("--", "--if-exists", "del-br", bridge)
 	if err != nil {
-		logrus.Errorf("Failed to delete OVS bridge, stdout: %q, stderr: %q, error: %v", stdout, stderr, err)
+		klog.Errorf("Failed to delete OVS bridge, stdout: %q, stderr: %q, error: %v", stdout, stderr, err)
 		return err
 	}
-	logrus.Infof("Successfully deleted OVS bridge %q", bridge)
+	klog.Infof("Successfully deleted OVS bridge %q", bridge)
 	return nil
 }

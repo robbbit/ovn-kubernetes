@@ -11,8 +11,6 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  annotations:
-    openshift.io/node-selector: "beta.kubernetes.io/os=linux"
   name: ovn-kubernetes
 
 ---
@@ -34,90 +32,57 @@ metadata:
   namespace: ovn-kubernetes
 
 ---
+
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  annotations:
-    rbac.authorization.k8s.io/system-only: "true"
-  name: system:ovn-reader
+  name: ovn-kubernetes
 rules:
 - apiGroups:
   - ""
-  - extensions
   resources:
   - pods
   - namespaces
-  - networkpolicies
   - nodes
-  verbs:
-  - get
-  - list
-  - watch
+  - endpoints
+  - services
+  - configmaps
+  verbs: ["get", "list", "watch"]
 - apiGroups:
+  - extensions
   - networking.k8s.io
+  - apps
   resources:
   - networkpolicies
-  verbs:
-  - get
-  - list
-  - watch
+  - statefulsets
+  verbs: ["get", "list", "watch"]
 - apiGroups:
   - ""
   resources:
   - events
-  verbs:
-  - create
-  - patch
-  - update
+  - endpoints
+  - configmaps
+  verbs: ["create", "patch", "update"]
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  - pods
+  verbs: ["patch", "update"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: ovn-reader
+  name: ovn-kubernetes
 roleRef:
-  name: system:ovn-reader
+  name: ovn-kubernetes
   kind: ClusterRole
   apiGroup: rbac.authorization.k8s.io
 subjects:
 - kind: ServiceAccount
   name: ovn
   namespace: ovn-kubernetes
-
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: cluster-admin-0
-roleRef:
-  name: cluster-admin
-  kind: ClusterRole
-  apiGroup: rbac.authorization.k8s.io
-subjects:
-- kind: ServiceAccount
-  name: ovn
-  namespace: ovn-kubernetes
-
----
-# service to expose the ovnkube-db pod
-apiVersion: v1
-kind: Service
-metadata:
-  name: ovnkube-db
-  namespace: ovn-kubernetes
-spec:
-  ports:
-  - name: north
-    port: 6641
-    protocol: TCP
-    targetPort: 6641
-  - name: south
-    port: 6642
-    protocol: TCP
-    targetPort: 6642
-  sessionAffinity: None
-  clusterIP: None
-  type: ClusterIP
 
 ---
 # The network cidr and service cidr are set in the ovn-config configmap
@@ -127,6 +92,7 @@ metadata:
   name: ovn-config
   namespace: ovn-kubernetes
 data:
-  net_cidr:      "{{ net_cidr | default('10.128.0.0/14/23') }}"
-  svc_cidr:      "{{ svc_cidr | default('172.30.0.0/16') }}"
-  k8s_apiserver: "{{ k8s_apiserver.stdout }}"
+  net_cidr:      "{{ net_cidr }}"
+  svc_cidr:      "{{ svc_cidr }}"
+  k8s_apiserver: "{{ k8s_apiserver }}"
+  mtu:           "{{ mtu_value }}"

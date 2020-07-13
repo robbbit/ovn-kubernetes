@@ -1,0 +1,63 @@
+package metrics
+
+import (
+	"runtime"
+	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// MetricCNIRequestDuration is a prometheus metric that tracks the duration
+// of CNI requests
+var MetricCNIRequestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	Namespace: MetricOvnkubeNamespace,
+	Subsystem: MetricOvnkubeSubsystemNode,
+	Name:      "cni_request_duration_seconds",
+	Help:      "The duration of CNI server requests.",
+	Buckets:   prometheus.ExponentialBuckets(.1, 2, 15)},
+	//labels
+	[]string{"command", "err"},
+)
+
+var MetricNodeReadyDuration = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: MetricOvnkubeNamespace,
+	Subsystem: MetricOvnkubeSubsystemNode,
+	Name:      "ready_duration_seconds",
+	Help:      "The duration for the node to get to ready state.",
+})
+
+var metricOvnNodePortEnabled = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: MetricOvnkubeNamespace,
+	Subsystem: MetricOvnkubeSubsystemNode,
+	Name:      "nodeport_enabled",
+	Help:      "Specifies if the node port is enabled on this node(1) or not(0).",
+})
+
+var registerNodeMetricsOnce sync.Once
+
+func RegisterNodeMetrics() {
+	registerNodeMetricsOnce.Do(func() {
+		// ovnkube-node metrics
+		prometheus.MustRegister(MetricCNIRequestDuration)
+		prometheus.MustRegister(MetricNodeReadyDuration)
+		prometheus.MustRegister(metricOvnNodePortEnabled)
+		prometheus.MustRegister(prometheus.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Namespace: MetricOvnkubeNamespace,
+				Subsystem: MetricOvnkubeSubsystemNode,
+				Name:      "build_info",
+				Help: "A metric with a constant '1' value labeled by version, revision, branch, " +
+					"and go version from which ovnkube was built and when and who built it.",
+				ConstLabels: prometheus.Labels{
+					"version":    "0.0",
+					"revision":   Commit,
+					"branch":     Branch,
+					"build_user": BuildUser,
+					"build_date": BuildDate,
+					"goversion":  runtime.Version(),
+				},
+			},
+			func() float64 { return 1 },
+		))
+	})
+}

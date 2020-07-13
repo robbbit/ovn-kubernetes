@@ -1,7 +1,7 @@
 # ovnkube-master
 # daemonset version 3
 # starts master daemons, each in a separate container
-# it is run on the master node(s)
+# it is run on the master(s)
 kind: Deployment
 apiVersion: apps/v1
 metadata:
@@ -10,10 +10,10 @@ metadata:
   namespace: ovn-kubernetes
   annotations:
     kubernetes.io/description: |
-      This daemonset launches the ovn-kubernetes networking components.
+      This Deployment launches the ovn-kubernetes master networking components.
 spec:
   progressDeadlineSeconds: 600
-  replicas: 1
+  replicas: {{ ovn_master_count | default(1|int) }}
   revisionHistoryLimit: 10
   selector:
     matchLabels:
@@ -29,8 +29,7 @@ spec:
         name: ovnkube-master
         component: network
         type: infra
-        openshift.io/component: network
-        beta.kubernetes.io/os: "linux"
+        kubernetes.io/os: "linux"
       annotations:
         scheduler.alpha.kubernetes.io/critical-pod: ''
     spec:
@@ -38,12 +37,35 @@ spec:
       # as all pods.
       serviceAccountName: ovn
       hostNetwork: true
-      hostPID: true
+
+      # required to be scheduled on a linux node with node-role.kubernetes.io/master label and
+      # only one instance of ovnkube-master pod per node
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/master
+                    operator: In
+                    values:
+                      - ""
+                  - key: kubernetes.io/os
+                    operator: In
+                    values:
+                      - "linux"
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: name
+                    operator: In
+                    values:
+                      - ovnkube-master
+              topologyKey: kubernetes.io/hostname
 
       containers:
-
-      # run-ovn-northd - v3
-      - name: run-ovn-northd
+      # ovn-northd - v3
+      - name: ovn-northd
         image: "{{ ovn_image | default('docker.io/ovnkube/ovn-daemonset:latest') }}"
         imagePullPolicy: "{{ ovn_image_pull_policy | default('IfNotPresent') }}"
 
@@ -51,45 +73,26 @@ spec:
 
         securityContext:
           runAsUser: 0
-          # Permission could be reduced by selecting an appropriate SELinux policy
-          privileged: true
+          capabilities:
+            add: ["SYS_NICE"]
 
+        terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
-        - mountPath: /etc/sysconfig/origin-node
-          name: host-sysconfig-node
-          readOnly: true
-        # Mount the entire run directory for socket access for Docker or CRI-o
-        # TODO: remove
-        - mountPath: /var/run
-          name: host-var-run
         # Run directories where we need to be able to access sockets
         - mountPath: /var/run/dbus/
           name: host-var-run-dbus
           readOnly: true
-        # ovn db is stored in the pod in /etc/openvswitch
-        # and on the host in /var/lib/openvswitch/
-        - mountPath: /etc/openvswitch/
-          name: host-var-lib-ovs
-        - mountPath: /var/lib/openvswitch/
-          name: host-var-lib-ovs
         - mountPath: /var/log/openvswitch/
+          name: host-var-log-ovs
+        - mountPath: /var/log/ovn/
           name: host-var-log-ovs
         - mountPath: /var/run/openvswitch/
           name: host-var-run-ovs
-       #  readOnly: false
-        - mountPath: /var/run/kubernetes/
-          name: host-var-run-kubernetes
+        - mountPath: /var/run/ovn/
+          name: host-var-run-ovs
+        - mountPath: /ovn-cert
+          name: host-ovn-cert
           readOnly: true
-        # We mount our socket here
-        - mountPath: /var/run/ovn-kubernetes
-          name: host-var-run-ovn-kubernetes
-        # CNI related mounts which we take over
-        - mountPath: /host/opt/cni/bin
-          name: host-opt-cni-bin
-        - mountPath: /etc/cni/net.d
-          name: host-etc-cni-netd
-        - mountPath: /var/lib/cni/networks/ovn-k8s-cni-overlay
-          name: host-var-lib-cni-networks-ovn-kubernetes
 
         resources:
           requests:
@@ -98,44 +101,73 @@ spec:
         env:
         - name: OVN_DAEMONSET_VERSION
           value: "3"
-        - name: OVN_LOG_NORTHD
-          value: "-vconsole:info"
-        - name: OVN_NET_CIDR
-          valueFrom:
-            configMapKeyRef:
-              name: ovn-config
-              key: net_cidr
-        - name: OVN_SVC_CIDR
-          valueFrom:
-            configMapKeyRef:
-              name: ovn-config
-              key: svc_cidr
+        - name: OVN_LOGLEVEL_NORTHD
+          value: "{{ ovn_loglevel_northd }}"
         - name: K8S_APISERVER
           valueFrom:
             configMapKeyRef:
               name: ovn-config
               key: k8s_apiserver
-        - name: K8S_NODE
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
         - name: OVN_KUBERNETES_NAMESPACE
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        ports:
-        - name: healthz
-          containerPort: 10257
-        # TODO: Temporarily disabled until we determine how to wait for clean default
-        # config
-        # livenessProbe:
-        #   initialDelaySeconds: 10
-        #   httpGet:
-        #     path: /healthz
-        #     port: 10257
-        #     scheme: HTTP
-        lifecycle:
+        - name: OVN_SSL_ENABLE
+          value: "{{ ovn_ssl_en }}"
+        readinessProbe:
+          exec:
+            command: ["/usr/bin/ovn-kube-util", "readiness-probe", "-t", "ovn-northd"]
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+          periodSeconds: 60
       # end of container
+
+      - name: nbctl-daemon
+        image: "{{ ovn_image | default('docker.io/ovnkube/ovn-daemonset:latest') }}"
+        imagePullPolicy: "{{ ovn_image_pull_policy | default('IfNotPresent') }}"
+
+        command: ["/root/ovnkube.sh", "run-nbctld"]
+
+        securityContext:
+          runAsUser: 0
+
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - mountPath: /var/log/openvswitch/
+          name: host-var-log-ovs
+        - mountPath: /var/log/ovn/
+          name: host-var-log-ovs
+        - mountPath: /var/run/openvswitch/
+          name: host-var-run-ovs
+        - mountPath: /var/run/ovn/
+          name: host-var-run-ovs
+        - mountPath: /ovn-cert
+          name: host-ovn-cert
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 300Mi
+        env:
+        - name: OVN_DAEMONSET_VERSION
+          value: "3"
+        - name: OVN_LOGLEVEL_NBCTLD
+          value: "{{ ovn_loglevel_nbctld }}"
+        - name: K8S_APISERVER
+          valueFrom:
+            configMapKeyRef:
+              name: ovn-config
+              key: k8s_apiserver
+        - name: OVN_SSL_ENABLE
+          value: "{{ ovn_ssl_en }}"
+
+        readinessProbe:
+          exec:
+            command: ["/usr/bin/ovn-kube-util", "readiness-probe", "-t", "ovn-nbctld"]
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+          periodSeconds: 60
+        # end of container
 
       - name: ovnkube-master
         image: "{{ ovn_image | default('docker.io/ovnkube/ovn-daemonset:latest') }}"
@@ -145,47 +177,22 @@ spec:
 
         securityContext:
           runAsUser: 0
-          # Permission could be reduced by selecting an appropriate SELinux policy
-          privileged: true
 
+        terminationMessagePolicy: FallbackToLogsOnError
         volumeMounts:
-        - mountPath: /etc/sysconfig/origin-node
-          name: host-sysconfig-node
-          readOnly: true
-        # Mount the entire run directory for socket access for Docker or CRI-o
-        # TODO: remove
-        - mountPath: /var/run
-          name: host-var-run
         # Run directories where we need to be able to access sockets
         - mountPath: /var/run/dbus/
           name: host-var-run-dbus
           readOnly: true
-        # ovn db is stored in the pod in /etc/openvswitch
-        # and on the host in /var/lib/openvswitch/
-        - mountPath: /etc/openvswitch/
-          name: host-var-lib-ovs
-        - mountPath: /var/lib/openvswitch/
-          name: host-var-lib-ovs
-        - mountPath: /var/log/openvswitch/
-          name: host-var-log-ovs
         - mountPath: /var/log/ovn-kubernetes/
           name: host-var-log-ovnkube
         - mountPath: /var/run/openvswitch/
           name: host-var-run-ovs
-       #  readOnly: false
-        - mountPath: /var/run/kubernetes/
-          name: host-var-run-kubernetes
+        - mountPath: /var/run/ovn/
+          name: host-var-run-ovs
+        - mountPath: /ovn-cert
+          name: host-ovn-cert
           readOnly: true
-        # We mount our socket here
-        - mountPath: /var/run/ovn-kubernetes
-          name: host-var-run-ovn-kubernetes
-        # CNI related mounts which we take over
-        - mountPath: /host/opt/cni/bin
-          name: host-opt-cni-bin
-        - mountPath: /etc/cni/net.d
-          name: host-etc-cni-netd
-        - mountPath: /var/lib/cni/networks/ovn-k8s-cni-overlay
-          name: host-var-lib-cni-networks-ovn-kubernetes
 
         resources:
           requests:
@@ -194,10 +201,14 @@ spec:
         env:
         - name: OVN_DAEMONSET_VERSION
           value: "3"
-        - name: OVN_MASTER
-          value: "true"
         - name: OVNKUBE_LOGLEVEL
-          value: "4"
+          value: "{{ ovnkube_master_loglevel }}"
+        - name: OVNKUBE_LOGFILE_MAXSIZE
+          value: "{{ ovnkube_logfile_maxsize }}"
+        - name: OVNKUBE_LOGFILE_MAXBACKUPS
+          value: "{{ ovnkube_logfile_maxbackups }}"
+        - name: OVNKUBE_LOGFILE_MAXAGE
+          value: "{{ ovnkube_logfile_maxage }}"
         - name: OVN_NET_CIDR
           valueFrom:
             configMapKeyRef:
@@ -221,42 +232,21 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        ports:
-        - name: healthz
-          containerPort: 10254
-        # TODO: Temporarily disabled until we determine how to wait for clean default
-        # config
-        # livenessProbe:
-        #   initialDelaySeconds: 10
-        #   httpGet:
-        #     path: /healthz
-        #     port: 10254
-        #     scheme: HTTP
-        lifecycle:
+        - name: OVN_HYBRID_OVERLAY_ENABLE
+          value: "{{ ovn_hybrid_overlay_enable }}"
+        - name: OVN_HYBRID_OVERLAY_NET_CIDR
+          value: "{{ ovn_hybrid_overlay_net_cidr }}"
+        - name: OVN_SSL_ENABLE
+          value: "{{ ovn_ssl_en }}"
+        - name: OVN_GATEWAY_MODE
+          value: "{{ ovn_gateway_mode }}"
       # end of container
 
-      nodeSelector:
-        node-role.kubernetes.io/master: ""
-        beta.kubernetes.io/os: "linux"
       volumes:
-      # In bootstrap mode, the host config contains information not easily available
-      # from other locations.
-      - name: host-sysconfig-node
-        hostPath:
-          path: /etc/sysconfig/origin-node
-      - name: host-modules
-        hostPath:
-          path: /lib/modules
-      # TODO: access to the docker socket should be replaced by CRI socket
-      - name: host-var-run
-        hostPath:
-          path: /var/run
+      # TODO: Need to check why we need this?
       - name: host-var-run-dbus
         hostPath:
           path: /var/run/dbus
-      - name: host-var-lib-ovs
-        hostPath:
-          path: /var/lib/openvswitch
       - name: host-var-log-ovs
         hostPath:
           path: /var/log/openvswitch
@@ -266,20 +256,9 @@ spec:
       - name: host-var-run-ovs
         hostPath:
           path: /var/run/openvswitch
-      - name: host-var-run-kubernetes
+      - name: host-ovn-cert
         hostPath:
-          path: /var/run/kubernetes
-      - name: host-var-run-ovn-kubernetes
-        hostPath:
-          path: /var/run/ovn-kubernetes
-      - name: host-opt-cni-bin
-        hostPath:
-          path: /opt/cni/bin
-      - name: host-etc-cni-netd
-        hostPath:
-          path: /etc/cni/net.d
-      - name: host-var-lib-cni-networks-ovn-kubernetes
-        hostPath:
-          path: /var/lib/cni/networks/ovn-k8s-cni-overlay
+          path: /etc/ovn
+          type: DirectoryOrCreate
       tolerations:
       - operator: "Exists"

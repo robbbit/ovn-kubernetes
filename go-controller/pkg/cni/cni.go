@@ -6,11 +6,14 @@ import (
 	"net"
 	"time"
 
-	"github.com/sirupsen/logrus"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog"
 
 	"github.com/containernetworking/cni/pkg/types/current"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/wait"
+	utilnet "k8s.io/utils/net"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
@@ -58,129 +61,141 @@ func extractPodBandwidthResources(podAnnotations map[string]string) (int64, int6
 	return ingress, egress, nil
 }
 
-func (pr *PodRequest) cmdAdd() *PodResult {
+func podDescription(pr *PodRequest) string {
+	return fmt.Sprintf("[%s/%s]", pr.PodNamespace, pr.PodName)
+}
+
+func (pr *PodRequest) cmdAdd(kclient kubernetes.Interface) ([]byte, error) {
 	namespace := pr.PodNamespace
 	podName := pr.PodName
 	if namespace == "" || podName == "" {
-		logrus.Errorf("required CNI variable missing")
-		return nil
+		return nil, fmt.Errorf("required CNI variable missing")
 	}
 
-	clientset, err := util.NewClientset(&config.Kubernetes)
-	if err != nil {
-		logrus.Errorf("Could not create clientset for kubernetes: %v", err)
-		return nil
-	}
-	kubecli := &kube.Kube{KClient: clientset}
+	kubecli := &kube.Kube{KClient: kclient}
 
 	// Get the IP address and MAC address from the API server.
 	// Exponential back off ~32 seconds + 7* t(api call)
 	var annotationBackoff = wait.Backoff{Duration: 1 * time.Second, Steps: 7, Factor: 1.5, Jitter: 0.1}
-	var annotation map[string]string
+	var annotations map[string]string
+	var err error
 	if err = wait.ExponentialBackoff(annotationBackoff, func() (bool, error) {
-		annotation, err = kubecli.GetAnnotationsOnPod(namespace, podName)
+		annotations, err = kubecli.GetAnnotationsOnPod(namespace, podName)
 		if err != nil {
-			// TODO: check if err is non recoverable
-			logrus.Warningf("Error while obtaining pod annotations - %v", err)
+			if errors.IsNotFound(err) {
+				// Pod not found; don't bother waiting longer
+				return false, err
+			}
+			klog.Warningf("Error getting pod annotations: %v", err)
 			return false, nil
 		}
-		if _, ok := annotation["ovn"]; ok {
+		if _, ok := annotations[util.OvnPodAnnotationName]; ok {
 			return true, nil
 		}
 		return false, nil
 	}); err != nil {
-		logrus.Errorf("failed to get pod annotation - %v", err)
-		return nil
+		return nil, fmt.Errorf("failed to get pod annotation: %v", err)
 	}
 
-	ovnAnnotation, ok := annotation["ovn"]
-	if !ok {
-		logrus.Errorf("failed to get ovn annotation from pod")
-		return nil
-	}
-
-	var ovnAnnotatedMap map[string]string
-	err = json.Unmarshal([]byte(ovnAnnotation), &ovnAnnotatedMap)
+	podInfo, err := util.UnmarshalPodAnnotation(annotations)
 	if err != nil {
-		logrus.Errorf("unmarshal ovn annotation failed")
-		return nil
+		return nil, fmt.Errorf("failed to unmarshal ovn annotation: %v", err)
 	}
 
-	ipAddress := ovnAnnotatedMap["ip_address"]
-	macAddress := ovnAnnotatedMap["mac_address"]
-	gatewayIP := ovnAnnotatedMap["gateway_ip"]
-
-	if ipAddress == "" || macAddress == "" || gatewayIP == "" {
-		logrus.Errorf("failed in pod annotation key extract")
-		return nil
-	}
-
-	ingress, egress, err := extractPodBandwidthResources(annotation)
+	ingress, egress, err := extractPodBandwidthResources(annotations)
 	if err != nil {
-		logrus.Errorf("failed to parse bandwidth request: %v", err)
-		return nil
+		return nil, fmt.Errorf("failed to parse bandwidth request: %v", err)
+	}
+	podInterfaceInfo := &PodInterfaceInfo{
+		PodAnnotation: *podInfo,
+		MTU:           config.Default.MTU,
+		Ingress:       ingress,
+		Egress:        egress,
+	}
+	response := &Response{}
+	if !config.UnprivilegedMode {
+		response.Result, err = pr.getCNIResult(podInterfaceInfo)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		response.PodIFInfo = podInterfaceInfo
 	}
 
-	var interfacesArray []*current.Interface
-	interfacesArray, err = pr.ConfigureInterface(namespace, podName, macAddress, ipAddress, gatewayIP, config.Default.MTU, ingress, egress)
+	responseBytes, err := json.Marshal(response)
 	if err != nil {
-		logrus.Errorf("Failed to configure interface in pod: %v", err)
-		return nil
+		return nil, fmt.Errorf("failed to marshal pod request response: %v", err)
 	}
 
-	// Build the result structure to pass back to the runtime
-	addr, addrNet, err := net.ParseCIDR(ipAddress)
-	if err != nil {
-		logrus.Errorf("failed to parse IP address %q: %v", ipAddress, err)
-		return nil
-	}
-	ipVersion := "6"
-	if addr.To4() != nil {
-		ipVersion = "4"
-	}
-	result := &current.Result{
-		Interfaces: interfacesArray,
-		IPs: []*current.IPConfig{
-			{
-				Version:   ipVersion,
-				Interface: current.Int(1),
-				Address:   net.IPNet{IP: addr, Mask: addrNet.Mask},
-				Gateway:   net.ParseIP(gatewayIP),
-			},
-		},
-	}
-
-	podResult := &PodResult{}
-	//versionedResult, _ := result.GetAsVersion(pr.CNIConf.CNIVersion)
-	podResult.Response, _ = json.Marshal(result)
-	return podResult
+	return responseBytes, nil
 }
 
-func (pr *PodRequest) cmdDel() *PodResult {
-	err := pr.PlatformSpecificCleanup()
-	if err != nil {
-		logrus.Errorf("Teardown error: %v", err)
+func (pr *PodRequest) cmdDel() ([]byte, error) {
+	if err := pr.PlatformSpecificCleanup(); err != nil {
+		return nil, err
 	}
-	return &PodResult{}
+	return []byte{}, nil
 }
 
 // HandleCNIRequest is the callback for all the requests
 // coming to the cniserver after being procesed into PodRequest objects
 // Argument '*PodRequest' encapsulates all the necessary information
+// kclient is passed in so that clientset can be reused from the server
 // Return value is the actual bytes to be sent back without further processing.
-func HandleCNIRequest(request *PodRequest) ([]byte, error) {
-	logrus.Infof("Dispatching pod network request %v", request)
-	var result *PodResult
+func HandleCNIRequest(request *PodRequest, kclient kubernetes.Interface) ([]byte, error) {
+	pd := podDescription(request)
+	klog.Infof("%s dispatching pod network request %v", pd, request)
+	var result []byte
+	var err error
 	switch request.Command {
 	case CNIAdd:
-		result = request.cmdAdd()
+		result, err = request.cmdAdd(kclient)
 	case CNIDel:
-		result = request.cmdDel()
+		result, err = request.cmdDel()
 	default:
 	}
-	if result == nil {
-		return PodResult{}.Response, fmt.Errorf("Nil response to CNI request")
+	klog.Infof("%s CNI request %v, result %q, err %v", pd, request, string(result), err)
+	if err != nil {
+		// Prefix errors with pod info for easier failure debugging
+		return nil, fmt.Errorf("%s %v", pd, err)
 	}
-	logrus.Infof("Returning pod network request %v, result %s err %v", request, string(result.Response), result.Err)
-	return result.Response, result.Err
+	return result, nil
+}
+
+// getCNIResult get result from pod interface info.
+func (pr *PodRequest) getCNIResult(podInterfaceInfo *PodInterfaceInfo) (*current.Result, error) {
+	interfacesArray, err := pr.ConfigureInterface(pr.PodNamespace, pr.PodName, podInterfaceInfo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure pod interface: %v", err)
+	}
+
+	gateways := map[string]net.IP{}
+	for _, gw := range podInterfaceInfo.Gateways {
+		if gw.To4() != nil && gateways["4"] == nil {
+			gateways["4"] = gw
+		} else if gw.To4() == nil && gateways["6"] == nil {
+			gateways["6"] = gw
+		}
+	}
+
+	// Build the result structure to pass back to the runtime
+	ips := []*current.IPConfig{}
+	for _, ipcidr := range podInterfaceInfo.IPs {
+		ip := &current.IPConfig{
+			Interface: current.Int(1),
+			Address:   *ipcidr,
+		}
+		if utilnet.IsIPv6CIDR(ipcidr) {
+			ip.Version = "6"
+		} else {
+			ip.Version = "4"
+		}
+		ip.Gateway = gateways[ip.Version]
+		ips = append(ips, ip)
+	}
+
+	return &current.Result{
+		Interfaces: interfacesArray,
+		IPs:        ips,
+	}, nil
 }

@@ -36,7 +36,7 @@ Options specified on the command-line override configuration file options which 
 Usage:
   -config-file string
      configuration file path (default: /etc/openvswitch/ovn_k8s.conf)
-  -cluster-subnet string
+  -cluster-subnets string
      cluster wide IP subnet to use (default: 11.11.0.0/16)
   -init-master string
      initialize master (that watches pods/nodes/services/policies), requires the hostname as argument
@@ -66,7 +66,7 @@ Usage:
   -k8s-token string
      the Kubernetes API authentication token (not required if --k8s-kubeconfig is given)
   -nb-address string
-     IP address and port of the OVN northbound API (eg, ssl://1.2.3.4:6641).  Leave empty to use a local unix socket.
+     IP address and port of the OVN northbound API (eg, ssl:1.2.3.4:6641).  Leave empty to use a local unix socket.
   -nb-client-privkey string
      Private key that the client should use for talking to the OVN database.  Leave empty to use local unix socket. (default: /etc/openvswitch/ovnnb-privkey.pem)
   -nb-client-cert string
@@ -74,7 +74,7 @@ Usage:
   -nb-client-cacert string
      CA certificate that the client should use for talking to the OVN database.  Leave empty to use local unix socket. (default: /etc/openvswitch/ovnnb-ca.cert)
   -sb-address string
-     IP address and port of the OVN southbound API (eg, ssl://1.2.3.4:6642).  Leave empty to use a local unix socket.
+     IP address and port of the OVN southbound API (eg, ssl:1.2.3.4:6642).  Leave empty to use a local unix socket.
   -sb-client-privkey string
      Private key that the client should use for talking to the OVN database.  Leave empty to use local unix socket. (default: /etc/openvswitch/ovnsb-privkey.pem)
   -sb-client-cert string
@@ -134,7 +134,7 @@ conf-dir=/etc/cni/net.d
 plugin=ovn-k8s-cni-overlay
 
 [ovnnorth]
-address=ssl://1.2.3.4:6641
+address=ssl:1.2.3.4:6641
 client-privkey=/path/to/private.key
 client-cert=/path/to/client.crt
 client-cacert=/path/to/client-ca.crt
@@ -155,7 +155,7 @@ ovnkube --init-master <master-host-name> \
 	--k8s-cacert <path to the cacert file> \
 	--k8s-token <token string for authentication with kube apiserver> \
 	--k8s-apiserver <url to the kube apiserver e.g. https://10.11.12.13.8443> \
-	--cluster-subnet <cidr representing the global pod network e.g. 192.168.0.0/16>
+	--cluster-subnets <cidr representing the global pod network e.g. 192.168.0.0/16>
 ```
 
 With the above the master ovnkube controller will initialize the central master logical router and establish the watcher loops for the following:

@@ -9,12 +9,13 @@ ovnkube \- ovn utility
 The ovn utility used to confiugre ovn-kubernetes
 .SH GLOBAL OPTIONS
 .TP
-\fB\--cluster-subnet\fR string
-A comma separated set of IP subnets and the associated hostsubnetlengths to use for
+\fB\--cluster-subnets\fR string
+A comma separated set of IP subnets and the associated hostsubnet prefix lengths to use for
 the cluster (eg, "10.128.0.0/14/23,10.0.0.0/14/23").  Each entry is given in the form
-IP address/subnet mask/hostsubnetlength, the hostsubnetlength is optional and if
-unspecified defaults to 24. The hostsubnetlength defines how many IP addresses are
-dedicated to each node. (default "11.11.0.0/16")
+[IP address/prefix-length/hostsubnet-prefix-length] and cannot overlap with other entries.
+The hostsubnet-prefix-length is optional and if unspecified defaults to 24. The
+hostsubnet-prefix-length defines how many IP addresses are dedicated to each node
+and may be different for each entry. (default "10.128.0.0/14/23")
 .TP
 \fB\--k8s-service-cidr\fR value
 A CIDR notation IP range from which k8s assigns service cluster IPs.
@@ -33,9 +34,8 @@ with in kubernetes cluster.
 .TP
 \fB\--gateway-mode\fR string
 On nodes, creates a gateway for traffic to exit the cluster. Set to one of
-"shared", "spare", or "local". Shared mode shares the gateway interface with
-the OVN logical network. Spare mode takes over the gateway interface for use
-with the OVN logical network. Local mode creates a NAT-ed interface for use
+"shared" or "local". Shared mode shares the gateway interface with
+the OVN logical network. Local mode creates a NAT-ed interface for use
 with the OVN logical network.
 .TP
 \fB\--init-gateways\fR
@@ -45,8 +45,6 @@ DEPRECATED; use \fB\--gateway-mode\fR instead.
 The interface in nodes that will be the gateway interface.  If none
 specified, then the node's interface on which the default gateway is
 configured will be used as the gateway interface. Only useful with
-\fB\--gateway-spare-interface\fR
-DEPRECATED; use \fB\--gateway-mode\fR instead.
 \fB--init-gateways\fR.
 .TP
 \fB\--gateway-nexthop\fR string
@@ -54,11 +52,6 @@ The external default gateway which is used as a next hop by
 OVN gateway. This is many times just the default gateway
 of the node in question. If not specified, the default gateway
 configured in the node is used. Only useful with \fB--init-gateways\fR.
-.TP
-\fB\--gateway-spare-interface\fR
-If true, assumes that "gateway-interface" provided can be exclusively
-used for the OVN gateway.  When true, only OVNrelated traffic can flow
-through this interface.
 .TP
 \fB\--gateway-local\fR
 DEPRECATED; use \fB\--gateway-mode\fR instead.
@@ -103,8 +96,11 @@ The absolute path to the Kubernetes API CA certificate (not required if --k8s-ku
 \fB\--k8s-token\fR string
 The Kubernetes API authentication token (not required if --k8s-kubeconfig is given).
 .TP
+\fB\--metrics-bind-address\fR string
+The IP address and port for the metrics server to serve on (set to 0.0.0.0 for all IPv4 interfaces).
+.TP
 \fB\--nb-address\fR string
-IP address and port of the OVN northbound API (eg, ssl://1.2.3.4:6641). Leave empty to use a local unix socket.
+IP address and port of the OVN northbound API (eg, ssl:1.2.3.4:6641). Leave empty to use a local unix socket.
 .TP
 \fB\--nb-client-privkey\fR string
 Private key that the client should use for talking to the OVN database.  Leave empty to use local unix socket.
@@ -116,7 +112,7 @@ Client certificate that the client should use for talking to the OVN database.  
 CA certificate that the client should use for talking to the OVN database.  Leave empty to use local unix socket.
 .TP
 \fB\--sb-address\fR string
-IP address and port of the OVN southbound database (eg, ssl://1.2.3.4:6642).  Leave empty to use a local unix socket.
+IP address and port of the OVN southbound database (eg, ssl:1.2.3.4:6642).  Leave empty to use a local unix socket.
 .TP
 \fB\--sb-client-privkey\fR string
 Private key that the client should use for talking to the OVN database.  Leave empty to use local unix socket.

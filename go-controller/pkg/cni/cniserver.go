@@ -8,9 +8,11 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
 )
 
 // *** The Server is PRIVATE API between OVN components and may be
@@ -39,7 +41,7 @@ import (
 // started.
 
 // NewCNIServer creates and returns a new Server object which will listen on a socket in the given path
-func NewCNIServer(rundir string) *Server {
+func NewCNIServer(rundir string, kclient kubernetes.Interface) *Server {
 	if len(rundir) == 0 {
 		rundir = serverRunDir
 	}
@@ -49,10 +51,12 @@ func NewCNIServer(rundir string) *Server {
 		Server: http.Server{
 			Handler: router,
 		},
-		rundir: rundir,
+		rundir:  rundir,
+		kclient: kclient,
 	}
 	router.NotFoundHandler = http.HandlerFunc(http.NotFound)
 	router.HandleFunc("/", s.handleCNIRequest).Methods("POST")
+	router.HandleFunc("/metrics", s.handleCNIMetrics).Methods("POST")
 	return s
 }
 
@@ -77,12 +81,7 @@ func gatherCNIArgs(env map[string]string) (map[string]string, error) {
 	return mapArgs, nil
 }
 
-func cniRequestToPodRequest(r *http.Request) (*PodRequest, error) {
-	var cr Request
-	b, _ := ioutil.ReadAll(r.Body)
-	if err := json.Unmarshal(b, &cr); err != nil {
-		return nil, fmt.Errorf("JSON unmarshal error: %v", err)
-	}
+func cniRequestToPodRequest(cr *Request) (*PodRequest, error) {
 
 	cmd, ok := cr.Env["CNI_COMMAND"]
 	if !ok {
@@ -91,7 +90,6 @@ func cniRequestToPodRequest(r *http.Request) (*PodRequest, error) {
 
 	req := &PodRequest{
 		Command: command(cmd),
-		Result:  make(chan *PodResult),
 	}
 
 	req.SandboxID, ok = cr.Env["CNI_CONTAINERID"]
@@ -134,21 +132,45 @@ func cniRequestToPodRequest(r *http.Request) (*PodRequest, error) {
 // Dispatch a pod request to the request handler and return the result to the
 // CNI server client
 func (s *Server) handleCNIRequest(w http.ResponseWriter, r *http.Request) {
-	req, err := cniRequestToPodRequest(r)
+	var cr Request
+	b, _ := ioutil.ReadAll(r.Body)
+	if err := json.Unmarshal(b, &cr); err != nil {
+		http.Error(w, fmt.Sprintf("%v", err), http.StatusBadRequest)
+		return
+	}
+	req, err := cniRequestToPodRequest(&cr)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("%v", err), http.StatusBadRequest)
 		return
 	}
 
-	logrus.Infof("Waiting for %s result for pod %s/%s", req.Command, req.PodNamespace, req.PodName)
-	result, err := s.requestFunc(req)
+	klog.Infof("Waiting for %s result for pod %s/%s", req.Command, req.PodNamespace, req.PodName)
+	result, err := s.requestFunc(req, s.kclient)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("%v", err), http.StatusBadRequest)
 	} else {
 		// Empty response JSON means success with no body
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := w.Write(result); err != nil {
-			logrus.Warningf("Error writing %s HTTP response: %v", req.Command, err)
+			klog.Warningf("Error writing %s HTTP response: %v", req.Command, err)
 		}
+	}
+}
+
+func (s *Server) handleCNIMetrics(w http.ResponseWriter, r *http.Request) {
+	var cm CNIRequestMetrics
+
+	b, _ := ioutil.ReadAll(r.Body)
+	if err := json.Unmarshal(b, &cm); err != nil {
+		klog.Warningf("Failed to unmarshal JSON (%s) to CNIRequestMetrics struct: %v",
+			string(b), err)
+	} else {
+		hasErr := fmt.Sprintf("%t", cm.HasErr)
+		metrics.MetricCNIRequestDuration.WithLabelValues(string(cm.Command), hasErr).Observe(cm.ElapsedTime)
+	}
+	// Empty response JSON means success with no body
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write([]byte{}); err != nil {
+		klog.Warningf("Error writing %s HTTP response for metrics post", err)
 	}
 }

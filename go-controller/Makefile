@@ -5,6 +5,10 @@ BINDIR ?= ${PREFIX}/bin
 CNIBINDIR ?= ${DESTDIR}/opt/cni/bin
 GCFLAGS ?=
 export GCFLAGS
+PKGS ?=
+GOPATH ?= $(shell go env GOPATH)
+TEST_REPORT_DIR?=$(CURDIR)/_artifacts
+export TEST_REPORT_DIR
 
 .PHONY: all build check test
 
@@ -17,17 +21,16 @@ export GCFLAGS
 
 
 all build:
-	hack/build-go.sh cmd/ovnkube/ovnkube.go
-	hack/build-go.sh cmd/ovn-kube-util/ovn-kube-util.go
-	hack/build-go.sh cmd/ovn-k8s-cni-overlay/ovn-k8s-cni-overlay.go
+	hack/build-go.sh cmd/ovnkube cmd/ovn-k8s-cni-overlay cmd/ovn-kube-util hybrid-overlay/cmd/hybrid-overlay-node
 
 windows:
-	export WINDOWS_BUILD="yes"; \
-	hack/build-go.sh cmd/ovnkube/ovnkube.go || exit 1; \
-	hack/build-go.sh cmd/ovn-k8s-cni-overlay/ovn-k8s-cni-overlay.go || exit 1;
+	WINDOWS_BUILD="yes" hack/build-go.sh cmd/ovnkube cmd/ovn-k8s-cni-overlay hybrid-overlay/cmd/hybrid-overlay-node
 
 check test:
 	hack/test-go.sh ${PKGS}
+
+codegen:
+	hack/update-codegen.sh
 
 install:
 	install -D -m 755 ${OUT_DIR}/go/bin/ovnkube ${BINDIR}/
@@ -36,20 +39,15 @@ install:
 
 clean:
 	rm -rf ${OUT_DIR}
+	rm -rf ${TEST_REPORT_DIR}
 
-.PHONY: check-gopath install.tools lint gofmt
+.PHONY: install.tools lint gofmt
 
-check-gopath:
-ifndef GOPATH
-	$(error GOPATH is not set)
-endif
-
-install.tools: check-gopath
-	go get -u gopkg.in/alecthomas/gometalinter.v1; \
-	$(GOPATH)/bin/gometalinter.v1 --install;
+install.tools:
+	curl -sfL https://install.goreleaser.com/github.com/golangci/golangci-lint.sh | bash -s -- -b ${GOPATH}/bin
 
 lint:
-	./hack/lint.sh
+	@GOPATH=${GOPATH} ./hack/lint.sh
 
 gofmt:
 	@./hack/verify-gofmt.sh
